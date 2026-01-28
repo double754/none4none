@@ -1,0 +1,101 @@
+name: Compress All Commits
+
+on:
+  push:
+    branches: [ main ]  # Adjust branch name as needed
+  repository_dispatch:
+    types: [compress_commits] # 监听来自其他action的触发
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  compress:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write # 需要删除action历史的权限
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Fetch all history
+    
+    - name: Configure Git
+      run: |
+        git config --global user.name "GitHub Actions Bot"
+        git config --global user.email "github-actions-bot@users.noreply.github.com"
+    
+    - name: Delete all workflow runs history
+      run: |
+        echo "Deleting all workflow runs history..."
+        
+        # 获取所有workflow runs
+        workflow_runs=$(curl -s \
+          -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          "https://api.github.com/repos/${{ github.repository }}/actions/runs?per_page=100")
+        
+        # 提取run IDs并删除
+        echo "$workflow_runs" | jq -r '.workflow_runs[].id' | while read -r run_id; do
+          if [ -n "$run_id" ] && [ "$run_id" != "null" ]; then
+            echo "Deleting workflow run: $run_id"
+            curl -X DELETE \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runs/$run_id" \
+              -w "HTTP Status: %{http_code}\n" || true
+            sleep 1  # 避免API限制
+          fi
+        done
+        
+        # 处理分页情况，删除更多历史记录
+        page=2
+        while [ $page -le 10 ]; do  # 最多处理10页
+          echo "Processing page $page..."
+          workflow_runs=$(curl -s \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs?per_page=100&page=$page")
+          
+          run_count=$(echo "$workflow_runs" | jq '.workflow_runs | length')
+          if [ "$run_count" -eq 0 ]; then
+            echo "No more workflow runs found"
+            break
+          fi
+          
+          echo "$workflow_runs" | jq -r '.workflow_runs[].id' | while read -r run_id; do
+            if [ -n "$run_id" ] && [ "$run_id" != "null" ]; then
+              echo "Deleting workflow run: $run_id"
+              curl -X DELETE \
+                -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/${{ github.repository }}/actions/runs/$run_id" \
+                -w "HTTP Status: %{http_code}\n" || true
+              sleep 1
+            fi
+          done
+          
+          page=$((page + 1))
+        done
+        
+        echo "Workflow runs history deletion completed"
+    
+    - name: Compress Commits
+      run: |
+        # Create temporary orphan branch
+        git checkout --orphan temp_branch
+        
+        # Add all files
+        git add -A
+        
+        # Commit with message "auto compress"
+        git commit -m "auto compress"
+        
+        # Delete the main branch
+        git branch -D main
+        
+        # Rename temp branch to main
+        git branch -m main
+        
+        # Force push to remote
+        git push -f origin main
